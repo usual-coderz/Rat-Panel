@@ -6,15 +6,25 @@ import re
 from app.countries import Country, resolve
 
 _LINE = re.compile(
-    r"^(?P<name>[^$\d]{2,48}?)\s*(?:[-–—:=]|\s{2,})\s*\$?\s*(?P<price>\d{1,4}(?:[.,]\d{1,3})?)\s*(?:USD|\$)?\s*$",
-    re.I,
+    r"^(?P<name>[^\d$]{2,48}?)\s*(?:[-–—:=|]|\s{2,}|\s)\s*\$?\s*"
+    r"(?P<price>\d{1,7}(?:[.,]\d{1,3})*)\s*(?:USD|usd|\$)?\s*$",
 )
 _EMOJI = re.compile(r"[^\w\s.'\-&()]", re.UNICODE)
-_NOISE = {"country", "rate", "price", "cap", "capacity", "available", "stock"}
+_NOISE = {"country", "rate", "price", "cap", "capacity", "available", "stock", "region", "code"}
 
 
 def _price(raw: str) -> float | None:
-    value = raw.replace(",", ".")
+    value = raw.strip().replace(" ", "").replace("$", "")
+    if not value:
+        return None
+    if "," in value and "." in value:
+        if value.rfind(",") > value.rfind("."):
+            value = value.replace(".", "").replace(",", ".")
+        else:
+            value = value.replace(",", "")
+    elif "," in value:
+        head, _, tail = value.partition(",")
+        value = head + tail if len(tail) == 3 and head else head + "." + tail
     try:
         number = float(value)
     except ValueError:
@@ -34,7 +44,7 @@ def parse(text: str) -> list[tuple[Country, float]]:
         if not match:
             continue
 
-        name = re.sub(r"\s{2,}", " ", match.group("name")).strip(" -–—:=.")
+        name = re.sub(r"\s{2,}", " ", match.group("name")).strip(" -–—:=|.")
         if not name or name.lower() in _NOISE:
             continue
         price = _price(match.group("price"))
