@@ -44,6 +44,12 @@ class SourceOut(BaseModel):
 class PriceOut(BaseModel):
     source: str
     price: float
+    free: float | None = None
+    new: float | None = None
+    spam: float | None = None
+    perm: float | None = None
+    stock: int | None = None
+    cooldown: str | None = None
     currency: str
     updated_at: datetime
 
