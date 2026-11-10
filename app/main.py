@@ -6,16 +6,18 @@ import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from pymongo import DESCENDING
 
-from app import crypto
 from app.config import settings
-from app.db import ACCOUNT_ID, db, now, oid
 from app.countries import resolve
+from app.db import ACCOUNT_ID, db, now, oid
 from app.schemas import AccountIn, AccountOut, PriceOut, SettingsIn, SourceIn, SourceOut, SourceUpdate
 from app.scanner import run_scan
 from app.telegram import account
 
-logging.basicConfig(level=settings.log_level, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logging.basicConfig(
+    level=settings.log_level, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
 log = logging.getLogger("api")
 
 DESCRIPTION = """
@@ -26,7 +28,7 @@ All endpoints require the `X-API-Key` header.
 - **Account** — one authorized account at a time. `POST /account` replaces the current one.
 - **Sources** — add bots to query. `start_payload` is used for deep links like `?start=Prices`.
 - **Scan** — sends `/cap` (fallback `/capacity`) to every enabled source and stores parsed prices.
-- **Prices** — read the stored, sorted prices for one country.
+- **Prices** — read the stored prices for one country, most expensive first.
 - **Settings** — check times are stored only; the caller triggers `/scan`.
 """
 
@@ -48,8 +50,13 @@ async def lifespan(_: FastAPI):
     await db.close()
 
 
-app = FastAPI(title="Market Analyzer API", version="1.0.0", description=DESCRIPTION,
-              openapi_tags=TAGS, lifespan=lifespan)
+app = FastAPI(
+    title="Market Analyzer API",
+    version="1.1.0",
+    description=DESCRIPTION,
+    openapi_tags=TAGS,
+    lifespan=lifespan,
+)
 
 
 async def auth(x_api_key: str = Header(default="", description="Shared API key")) -> None:
@@ -64,8 +71,11 @@ async def get_account():
     if not doc:
         return AccountOut(connected=False)
     return AccountOut(
-        connected=account.connected, name=doc.get("name"), username=doc.get("username"),
-        phone=doc.get("phone"), session_masked=doc.get("session_masked"),
+        connected=account.connected,
+        name=doc.get("name"),
+        username=doc.get("username"),
+        phone=doc.get("phone"),
+        session_masked=doc.get("session_masked"),
         connected_at=doc.get("connected_at"),
     )
 
@@ -77,8 +87,12 @@ async def set_account(body: AccountIn):
     except Exception as exc:
         raise HTTPException(400, f"account rejected: {exc}") from exc
     return AccountOut(
-        connected=True, name=doc["name"], username=doc["username"], phone=doc["phone"],
-        session_masked=doc["session_masked"], connected_at=doc["connected_at"],
+        connected=True,
+        name=doc["name"],
+        username=doc["username"],
+        phone=doc["phone"],
+        session_masked=doc["session_masked"],
+        connected_at=doc["connected_at"],
     )
 
 
@@ -92,9 +106,13 @@ async def delete_account():
 # ------------------------------- sources --------------------------------- #
 def _source_out(doc: dict) -> SourceOut:
     return SourceOut(
-        id=str(doc["_id"]), username=doc["username"], start_payload=doc.get("start_payload"),
-        enabled=doc.get("enabled", True), status=doc.get("status", "new"),
-        last_checked=doc.get("last_checked"), last_error=doc.get("last_error"),
+        id=str(doc["_id"]),
+        username=doc["username"],
+        start_payload=doc.get("start_payload"),
+        enabled=doc.get("enabled", True),
+        status=doc.get("status", "new"),
+        last_checked=doc.get("last_checked"),
+        last_error=doc.get("last_error"),
     )
 
 
@@ -103,21 +121,33 @@ async def list_sources():
     return [_source_out(d) async for d in db.db.sources.find({}).sort("username", 1)]
 
 
-@app.post("/sources", tags=["sources"], response_model=SourceOut, status_code=201,
-          dependencies=[Depends(auth)])
+@app.post(
+    "/sources", tags=["sources"], response_model=SourceOut, status_code=201, dependencies=[Depends(auth)]
+)
 async def add_source(body: SourceIn):
     username = body.username if body.username.startswith("@") else f"@{body.username}"
     if await db.db.sources.find_one({"username": username}):
         raise HTTPException(409, "source already exists")
-    doc = {"username": username, "start_payload": body.start_payload, "enabled": True,
-           "status": "new", "last_checked": None, "last_error": None, "created_at": now()}
+    doc = {
+        "username": username,
+        "start_payload": body.start_payload,
+        "enabled": True,
+        "status": "new",
+        "last_checked": None,
+        "last_error": None,
+        "created_at": now(),
+    }
     doc["_id"] = (await db.db.sources.insert_one(dict(doc))).inserted_id
     return _source_out(doc)
 
 
 @app.patch("/sources/{sid}", tags=["sources"], response_model=SourceOut, dependencies=[Depends(auth)])
 async def update_source(sid: str, body: SourceUpdate):
-    doc = await db.db.sources.find_one({"_id": oid(sid)})
+    try:
+        key = oid(sid)
+    except Exception:
+        raise HTTPException(400, "bad id")
+    doc = await db.db.sources.find_one({"_id": key})
     if not doc:
         raise HTTPException(404, "not found")
 
@@ -132,7 +162,11 @@ async def update_source(sid: str, body: SourceUpdate):
 
 @app.delete("/sources/{sid}", tags=["sources"], dependencies=[Depends(auth)])
 async def delete_source(sid: str):
-    if not (await db.db.sources.delete_one({"_id": oid(sid)})).deleted_count:
+    try:
+        key = oid(sid)
+    except Exception:
+        raise HTTPException(400, "bad id")
+    if not (await db.db.sources.delete_one({"_id": key})).deleted_count:
         raise HTTPException(404, "not found")
     await db.db.prices.delete_many({"source_id": sid})
     return {"deleted": True}
@@ -148,15 +182,23 @@ async def scan():
 
 # ------------------------------- prices ---------------------------------- #
 @app.get("/prices", tags=["prices"], response_model=list[PriceOut], dependencies=[Depends(auth)])
-async def prices(country: str = Query(description="Country name, ISO code or calling code"),
-                 limit: int = 10):
+async def prices(
+    country: str = Query(description="Country name, ISO code or calling code"),
+    limit: int = Query(default=3, ge=1, le=20, description="Most expensive first"),
+):
     target = resolve(country)
     if target is None:
         raise HTTPException(404, "unknown country")
     return [
-        PriceOut(source=d["source"], price=d["price"], currency=d.get("currency", "USD"),
-                 updated_at=d["updated_at"])
-        async for d in db.db.prices.find({"country_code": target.iso2}).sort("price", -1).limit(limit)
+        PriceOut(
+            source=d["source"],
+            price=d["price"],
+            currency=d.get("currency", "USD"),
+            updated_at=d["updated_at"],
+        )
+        async for d in db.db.prices.find({"country_code": target.iso2})
+        .sort("price", DESCENDING)
+        .limit(limit)
     ]
 
 
