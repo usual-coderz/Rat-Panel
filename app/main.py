@@ -38,8 +38,8 @@ All endpoints require the `X-API-Key` header.
 - **Account** — one authorized account at a time. `POST /account` replaces the current one.
 - **Sources** — add bots to query. `start_payload` is used for deep links like `?start=Prices`.
 - **Scan** — sends `/cap` (fallback `/capacity`) to every enabled source and stores parsed prices.
-- **Prices** — resolve a country (name, ISO code, calling code or flag) and read stored prices,
-  most expensive first. `live=true` queries the sources when the cache is empty.
+- **Prices** — resolve a country (name, ISO code, calling code or flag) and return the most
+  expensive offers first. `live=true` queries the sources when the cache is empty.
 - **Settings** — check times are stored only; the caller triggers `/scan`.
 """
 
@@ -63,7 +63,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Market Analyzer API",
-    version="1.2.0",
+    version="1.3.0",
     description=DESCRIPTION,
     openapi_tags=TAGS,
     lifespan=lifespan,
@@ -192,6 +192,21 @@ async def scan():
 
 
 # ------------------------------- prices ---------------------------------- #
+def _price_out(doc: dict) -> PriceOut:
+    return PriceOut(
+        source=doc["source"],
+        price=doc["price"],
+        free=doc.get("free"),
+        new=doc.get("new"),
+        spam=doc.get("spam"),
+        perm=doc.get("perm"),
+        stock=doc.get("stock"),
+        cooldown=doc.get("cooldown"),
+        currency=doc.get("currency", "USD"),
+        updated_at=doc["updated_at"],
+    )
+
+
 @app.get("/prices", tags=["prices"], response_model=PricesOut, dependencies=[Depends(auth)])
 async def prices(
     country: str = Query(description="Country name, ISO code, calling code or flag"),
@@ -203,12 +218,7 @@ async def prices(
         raise HTTPException(404, f"unknown country: {country}")
 
     rows = [
-        PriceOut(
-            source=d["source"],
-            price=d["price"],
-            currency=d.get("currency", "USD"),
-            updated_at=d["updated_at"],
-        )
+        _price_out(d)
         async for d in db.db.prices.find({"country_code": target.iso2})
         .sort("price", DESCENDING)
         .limit(limit)
@@ -234,7 +244,12 @@ async def resolve_country(
     target = resolve(country)
     if target is None:
         raise HTTPException(404, f"unknown country: {country}")
-    return {"input": country, "country": target.name, "iso2": target.iso2, "calling_code": target.calling_code}
+    return {
+        "input": country,
+        "country": target.name,
+        "iso2": target.iso2,
+        "calling_code": target.calling_code,
+    }
 
 
 # ------------------------------ settings --------------------------------- #
