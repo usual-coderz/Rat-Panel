@@ -32,12 +32,27 @@ class DB:
         return self._db
 
     async def connect(self) -> None:
-        self._client = AsyncIOMotorClient(settings.mongo_uri, tz_aware=True, serverSelectionTimeoutMS=8000)
+        self._client = AsyncIOMotorClient(
+            settings.mongo_uri, tz_aware=True, serverSelectionTimeoutMS=8000
+        )
         self._db = self._client[settings.db_name]
         await self._client.admin.command("ping")
+
         await self.db.sources.create_index([("username", ASCENDING)], unique=True)
+        await self.db.sources.create_index([("enabled", ASCENDING)])
         await self.db.prices.create_index([("country_code", ASCENDING), ("price", DESCENDING)])
-        await self.db.prices.create_index([("source_id", ASCENDING), ("country_code", ASCENDING)], unique=True)
+        await self.db.prices.create_index(
+            [("source_id", ASCENDING), ("country_code", ASCENDING)], unique=True
+        )
+        await self.db.prices.create_index([("updated_at", DESCENDING)])
+        await self.db.settings.update_one(
+            {"_id": "global"},
+            {"$setOnInsert": {
+                "check_times": ["10:00", "22:00"],
+                "currency": settings.default_currency,
+            }},
+            upsert=True,
+        )
 
     async def close(self) -> None:
         if self._client:
@@ -46,7 +61,11 @@ class DB:
     async def settings_doc(self) -> dict[str, Any]:
         doc = await self.db.settings.find_one({"_id": "global"})
         if doc is None:
-            doc = {"_id": "global", "check_times": ["10:00", "22:00"], "currency": settings.default_currency}
+            doc = {
+                "_id": "global",
+                "check_times": ["10:00", "22:00"],
+                "currency": settings.default_currency,
+            }
             await self.db.settings.insert_one(dict(doc))
         return doc
 
