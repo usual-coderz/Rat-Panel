@@ -104,7 +104,13 @@ class Account:
             message = await client.send_message(handle, text)
         return message.id
 
+    async def _prime(self, handle: str, start_payload: str | None) -> None:
+        if start_payload:
+            await self._send(handle, f"/start {start_payload}")
+            await asyncio.sleep(settings.send_delay)
+
     async def _await_reply(self, handle: str, baseline: int) -> str:
+        """Wait for one or more inbound messages and join them in order."""
         client = self._client
         if client is None:
             return ""
@@ -113,22 +119,39 @@ class Account:
         while loop.time() < deadline:
             await asyncio.sleep(1.5)
             try:
-                messages = await client.get_messages(handle, limit=5, min_id=baseline)
+                messages = await client.get_messages(handle, limit=20, min_id=baseline)
             except errors.FloodWaitError as exc:
                 await asyncio.sleep(exc.seconds + 1)
                 continue
-            incoming = [m for m in messages if not m.out and m.text]
-            if incoming:
-                return max(incoming, key=lambda m: m.id).text
+            except Exception as exc:
+                log.warning("reply fetch failed on %s: %s", handle, exc)
+                continue
+
+            if not any(not m.out and m.text for m in messages):
+                continue
+
+            await asyncio.sleep(1.2)
+            try:
+                messages = await client.get_messages(handle, limit=20, min_id=baseline)
+            except Exception:
+                pass
+            incoming = sorted((m for m in messages if not m.out and m.text), key=lambda m: m.id)
+            return "\n".join(m.text for m in incoming)
         return ""
+
+    async def query_text(self, username: str, start_payload: str | None, text: str) -> str:
+        """Send an arbitrary query to a source bot and return its reply."""
+        handle = username if username.startswith("@") else f"@{username}"
+        async with self._chat_lock(handle):
+            await self._prime(handle, start_payload)
+            baseline = await self._send(handle, text)
+            return await self._await_reply(handle, baseline)
 
     async def fetch_capacity(self, username: str, start_payload: str | None) -> str:
         """Send /start (with payload) then /cap, falling back to /capacity."""
         handle = username if username.startswith("@") else f"@{username}"
         async with self._chat_lock(handle):
-            if start_payload:
-                await self._send(handle, f"/start {start_payload}")
-                await asyncio.sleep(settings.send_delay)
+            await self._prime(handle, start_payload)
 
             baseline = await self._send(handle, CAP_COMMANDS[0])
             text = await self._await_reply(handle, baseline)
