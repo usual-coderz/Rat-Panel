@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from html import escape
 
 import httpx
 from aiogram import Bot, Dispatcher, F, Router
@@ -22,7 +23,9 @@ log = logging.getLogger("bot")
 
 router = Router()
 HEADERS = {"X-API-Key": settings.api_key}
-TIMEOUT = httpx.Timeout(settings.scan_timeout + 60, connect=15)
+TIMEOUT = httpx.Timeout(settings.scan_timeout + 120, connect=15)
+
+MEDALS = ("🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟")
 
 
 class Admin(BaseFilter):
@@ -43,7 +46,9 @@ class Flow(StatesGroup):
 
 async def api(method: str, path: str, **kwargs):
     try:
-        async with httpx.AsyncClient(base_url=settings.api_base_url, headers=HEADERS, timeout=TIMEOUT) as client:
+        async with httpx.AsyncClient(
+            base_url=settings.api_base_url, headers=HEADERS, timeout=TIMEOUT
+        ) as client:
             resp = await client.request(method, path, **kwargs)
     except httpx.HTTPError as exc:
         log.warning("api %s %s failed: %s", method, path, exc)
@@ -75,7 +80,8 @@ async def home_view():
         "📊 <b>MARKET ANALYZER</b>\n\n"
         f"👤 Account: <b>{'connected' if acc.get('connected') else 'none'}</b>\n"
         f"🤖 Sources: <b>{health.get('sources', 0)}</b>\n"
-        f"🌍 Countries: <b>{health.get('countries', 0)}</b>"
+        f"🌍 Countries: <b>{health.get('countries', 0)}</b>\n"
+        f"🔎 Live lookup: <b>{'on' if health.get('live_fetch') else 'off'}</b>"
     )
     return text, home_kb()
 
@@ -109,8 +115,9 @@ async def account_render(cb: CallbackQuery, state: FSMContext | None):
     else:
         text = (
             "👤 <b>ACCOUNT</b>\n\n"
-            f"name: <b>{acc.get('name')}</b>\nphone: <b>{acc.get('phone')}</b>\n"
-            f"session: <code>{acc.get('session_masked')}</code>"
+            f"name: <b>{escape(str(acc.get('name')))}</b>\n"
+            f"phone: <b>{escape(str(acc.get('phone')))}</b>\n"
+            f"session: <code>{escape(str(acc.get('session_masked')))}</code>"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="♻️ Replace", callback_data="acc_add")],
@@ -146,7 +153,8 @@ async def save_account(message: Message, state: FSMContext):
     })
     await state.clear()
     await message.answer(
-        f"✅ Connected as {data.get('phone')}" if code == 200 else f"❌ {data.get('detail')}",
+        f"✅ Connected as {escape(str(data.get('phone')))}" if code == 200
+        else f"❌ {escape(str(data.get('detail')))}",
         reply_markup=back("account"),
     )
 
@@ -172,7 +180,10 @@ def sources_kb(rows: list[dict]) -> InlineKeyboardMarkup:
 
 async def sources_view():
     _, rows = await api("GET", "/sources")
-    body = "\n".join(f"{'🟢' if r['enabled'] else '⚪'} {r['username']} — {r['status']}" for r in rows) or "none"
+    body = "\n".join(
+        f"{'🟢' if r['enabled'] else '⚪'} <code>{escape(r['username'])}</code> — {escape(r['status'])}"
+        for r in rows
+    ) or "none"
     return (
         f"🤖 <b>SOURCES</b>\n\n{body}\n\nAdd: <code>@username</code> or <code>@username|start_payload</code>\n"
         "Example: <code>@TGLionAPI_bot|Prices</code>",
@@ -205,7 +216,8 @@ async def save_source(message: Message, state: FSMContext):
     })
     await state.clear()
     await message.answer(
-        f"✅ Added {data.get('username')}" if code == 201 else f"❌ {data.get('detail')}",
+        f"✅ Added {escape(str(data.get('username')))}" if code == 201
+        else f"❌ {escape(str(data.get('detail')))}",
         reply_markup=back("sources"),
     )
 
@@ -237,38 +249,86 @@ async def scan(cb: CallbackQuery):
     await cb.message.edit_text("🚀 Sending /cap to all sources…", reply_markup=back())
     code, data = await api("POST", "/scan")
     if code != 200:
-        await cb.message.edit_text(f"⚠️ {data.get('detail')}", reply_markup=back())
+        await cb.message.edit_text(f"⚠️ {escape(str(data.get('detail')))}", reply_markup=back())
         return
     body = f"✅ done\nsources: {data['sources']}\nrecords: {data['records']}"
     if data["errors"]:
-        body += "\n\n⚠️ failures:\n" + "\n".join(data["errors"][:5])
+        body += "\n\n⚠️ failures:\n" + escape("\n".join(data["errors"][:5]))
     await cb.message.edit_text(body, reply_markup=back())
 
 
 # ------------------------------- prices ---------------------------------- #
+def prices_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Prices", callback_data="price")],
+        [InlineKeyboardButton(text="🔙 Home", callback_data="home")],
+    ])
+
+
 @router.callback_query(F.data == "price")
 async def ask_price(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Flow.price)
-    await cb.message.edit_text("Send a country name, ISO code or calling code.", reply_markup=back())
+    await cb.message.edit_text(
+        "Send a country name, ISO code, calling code or flag.\n"
+        "e.g. <code>Saudi</code>, <code>SA</code>, <code>+966</code>, <code>🇸🇦</code>",
+        reply_markup=back(),
+    )
     await cb.answer()
+
+
+def render_prices(data: dict) -> str:
+    rows = data.get("rows") or []
+    header = (
+        f"💰 <b>{escape(str(data.get('country')).upper())}</b> "
+        f"<code>+{escape(str(data.get('calling_code')))}</code>"
+    )
+    source = "cache" if data.get("cached") else "live"
+    lines = [header, f"<i>top {len(rows)} — {source}</i>", ""]
+    for medal, row in zip(MEDALS, rows):
+        lines.append(
+            f"{medal} <code>{escape(str(row['source']))}</code> — "
+            f"<code>{escape(str(row['currency']))} {row['price']:,.2f}</code>"
+        )
+    lines.append(f"\n🕒 {str(rows[0]['updated_at'])[11:16]} UTC")
+    return "\n".join(lines)
 
 
 @router.message(Flow.price)
 async def show_prices(message: Message, state: FSMContext):
     await state.clear()
-    country = (message.text or "").strip()
-    code, rows = await api("GET", "/prices", params={"country": country, "limit": 3})
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("❌ Send a country first.", reply_markup=prices_kb())
+        return
+
+    code, data = await api("GET", "/prices", params={"country": raw, "limit": 3})
+    if code == 404:
+        await message.answer(
+            f"❌ Unknown country: <code>{escape(raw)}</code>\n\n"
+            "Send a name, ISO code, calling code or flag.",
+            reply_markup=prices_kb(),
+        )
+        return
+
+    if code == 200 and not data.get("rows"):
+        await message.answer(f"🔎 <code>{escape(raw)}</code> — querying sources…")
+        code, data = await api(
+            "GET", "/prices", params={"country": raw, "limit": 3, "live": "true"}
+        )
+
     if code != 200:
-        await message.answer(f"⚠️ {rows.get('detail')}", reply_markup=home_kb())
+        await message.answer(f"⚠️ {escape(str(data.get('detail')))}", reply_markup=prices_kb())
         return
-    if not rows:
-        await message.answer("❌ No data.", reply_markup=home_kb())
+
+    if not data.get("rows"):
+        await message.answer(
+            f"❌ No data for <code>{escape(str(data.get('country')))}</code> "
+            f"<code>+{escape(str(data.get('calling_code')))}</code>.",
+            reply_markup=prices_kb(),
+        )
         return
-    lines = [f"💰 <b>{country.upper()}</b> — top 3", ""]
-    for medal, row in zip(("🥇", "🥈", "🥉"), rows):
-        lines.append(f"{medal} {row['source']} — {row['currency']} {row['price']:,.2f}")
-    lines.append(f"\n🕒 {rows[0]['updated_at'][11:16]} UTC")
-    await message.answer("\n".join(lines), reply_markup=home_kb())
+
+    await message.answer(render_prices(data), reply_markup=prices_kb())
 
 
 # ------------------------------ settings --------------------------------- #
@@ -277,8 +337,9 @@ async def settings_view():
     times = doc.get("check_times") or []
     text = (
         "⚙️ <b>SETTINGS</b>\n\n"
-        f"⏰ Check times: <b>{', '.join(times) or 'none'}</b>\n"
-        f"💱 Currency: <b>{doc.get('currency')}</b>"
+        f"⏰ Check times: <b>{escape(', '.join(times) or 'none')}</b>\n"
+        f"💱 Currency: <b>{escape(str(doc.get('currency')))}</b>\n"
+        f"🔎 Live lookup: <b>{'on' if doc.get('live_fetch') else 'off'}</b>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏰ Set check times", callback_data="set_times")],
@@ -298,7 +359,9 @@ async def settings_menu(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "set_times")
 async def ask_times(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Flow.times)
-    await cb.message.edit_text("Send one or two times: <code>10:00, 22:00</code>", reply_markup=back("settings"))
+    await cb.message.edit_text(
+        "Send one or two times: <code>10:00, 22:00</code>", reply_markup=back("settings")
+    )
     await cb.answer()
 
 
@@ -307,7 +370,10 @@ async def save_times(message: Message, state: FSMContext):
     values = [v.strip() for v in (message.text or "").split(",") if v.strip()]
     code, data = await api("PATCH", "/settings", json={"check_times": values})
     await state.clear()
-    await message.answer("✅ saved" if code == 200 else f"❌ {data.get('detail')}", reply_markup=back("settings"))
+    await message.answer(
+        "✅ saved" if code == 200 else f"❌ {escape(str(data.get('detail')))}",
+        reply_markup=back("settings"),
+    )
 
 
 @router.errors()
