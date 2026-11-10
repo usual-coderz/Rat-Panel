@@ -1,16 +1,22 @@
-"""Extract `Country - price` pairs out of a /cap reply."""
+"""Extract country/price pairs out of a source reply, whatever the layout."""
 from __future__ import annotations
 
 import re
 
 from app.countries import Country, resolve
 
-_LINE = re.compile(
-    r"^(?P<name>[^\d$]{2,48}?)\s*(?:[-–—:=|]|\s{2,}|\s)\s*\$?\s*"
-    r"(?P<price>\d{1,7}(?:[.,]\d{1,3})*)\s*(?:USD|usd|\$)?\s*$",
+_EMOJI = re.compile(r"[^\w\s.'\-&()+%/]", re.UNICODE)
+_BULLET = re.compile(r"^[\s\-–—•·*|=:,>/]+")
+_TAIL = re.compile(r"[\s\-–—•·*|=:,>/]+$")
+_MONEY = re.compile(
+    r"(?<![\w.,])(?:[$€£₽]\s?)?(?P<price>\d{1,6}(?:[.,]\d{1,3}){0,2})"
+    r"\s?(?:usd|eur|rub|inr|gbp|руб|[$€£₽])?",
+    re.IGNORECASE,
 )
-_EMOJI = re.compile(r"[^\w\s.'\-&()]", re.UNICODE)
-_NOISE = {"country", "rate", "price", "cap", "capacity", "available", "stock", "region", "code"}
+_NOISE = {
+    "country", "rate", "price", "prices", "cap", "capacity", "available", "stock",
+    "region", "code", "in", "out", "total", "updated", "list",
+}
 
 
 def _price(raw: str) -> float | None:
@@ -29,7 +35,28 @@ def _price(raw: str) -> float | None:
         number = float(value)
     except ValueError:
         return None
-    return number if number > 0 else None
+    return number if 0 < number < 100_000 else None
+
+
+def _clean(text: str) -> str:
+    text = _EMOJI.sub(" ", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    text = _BULLET.sub("", text)
+    text = _TAIL.sub("", text)
+    return text.strip()[:48]
+
+
+def _candidates(line: str):
+    for match in _MONEY.finditer(line):
+        price = _price(match.group("price"))
+        if price is None:
+            continue
+        head = _clean(line[: match.start()])
+        tail = _clean(line[match.end():])
+        if head:
+            yield head, price
+        if tail:
+            yield tail, price
 
 
 def parse(text: str) -> list[tuple[Country, float]]:
@@ -37,23 +64,18 @@ def parse(text: str) -> list[tuple[Country, float]]:
     seen: set[str] = set()
 
     for raw_line in (text or "").splitlines():
-        line = _EMOJI.sub(" ", raw_line).strip()
-        if not line:
-            continue
-        match = _LINE.match(line)
-        if not match:
+        line = re.sub(r"\s{2,}", "  ", raw_line).strip()
+        if len(_clean(line)) < 2:
             continue
 
-        name = re.sub(r"\s{2,}", " ", match.group("name")).strip(" -–—:=|.")
-        if not name or name.lower() in _NOISE:
-            continue
-        price = _price(match.group("price"))
-        if price is None:
-            continue
+        for name, price in _candidates(line):
+            if not name or name.lower() in _NOISE:
+                continue
+            country = resolve(name)
+            if country is None or country.iso2 in seen:
+                continue
+            seen.add(country.iso2)
+            out.append((country, price))
+            break
 
-        country = resolve(name)
-        if country is None or country.iso2 in seen:
-            continue
-        seen.add(country.iso2)
-        out.append((country, price))
     return out
