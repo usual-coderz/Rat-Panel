@@ -11,7 +11,17 @@ from pymongo import DESCENDING
 from app.config import settings
 from app.countries import resolve
 from app.db import ACCOUNT_ID, db, now, oid
-from app.schemas import AccountIn, AccountOut, PriceOut, SettingsIn, SourceIn, SourceOut, SourceUpdate
+from app.live import fetch_live
+from app.schemas import (
+    AccountIn,
+    AccountOut,
+    PriceOut,
+    PricesOut,
+    SettingsIn,
+    SourceIn,
+    SourceOut,
+    SourceUpdate,
+)
 from app.scanner import run_scan
 from app.telegram import account
 
@@ -28,7 +38,8 @@ All endpoints require the `X-API-Key` header.
 - **Account** — one authorized account at a time. `POST /account` replaces the current one.
 - **Sources** — add bots to query. `start_payload` is used for deep links like `?start=Prices`.
 - **Scan** — sends `/cap` (fallback `/capacity`) to every enabled source and stores parsed prices.
-- **Prices** — read the stored prices for one country, most expensive first.
+- **Prices** — resolve a country (name, ISO code, calling code or flag) and read stored prices,
+  most expensive first. `live=true` queries the sources when the cache is empty.
 - **Settings** — check times are stored only; the caller triggers `/scan`.
 """
 
@@ -36,7 +47,7 @@ TAGS = [
     {"name": "account", "description": "Single authorized Telegram account."},
     {"name": "sources", "description": "Capacity bots to query."},
     {"name": "scan", "description": "Run collection."},
-    {"name": "prices", "description": "Read stored prices."},
+    {"name": "prices", "description": "Resolve countries and read stored prices."},
     {"name": "settings", "description": "Currency and check times."},
 ]
 
@@ -52,7 +63,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Market Analyzer API",
-    version="1.1.0",
+    version="1.2.0",
     description=DESCRIPTION,
     openapi_tags=TAGS,
     lifespan=lifespan,
@@ -181,15 +192,17 @@ async def scan():
 
 
 # ------------------------------- prices ---------------------------------- #
-@app.get("/prices", tags=["prices"], response_model=list[PriceOut], dependencies=[Depends(auth)])
+@app.get("/prices", tags=["prices"], response_model=PricesOut, dependencies=[Depends(auth)])
 async def prices(
-    country: str = Query(description="Country name, ISO code or calling code"),
+    country: str = Query(description="Country name, ISO code, calling code or flag"),
     limit: int = Query(default=3, ge=1, le=20, description="Most expensive first"),
+    live: bool = Query(default=False, description="Query the sources when the cache is empty"),
 ):
     target = resolve(country)
     if target is None:
-        raise HTTPException(404, "unknown country")
-    return [
+        raise HTTPException(404, f"unknown country: {country}")
+
+    rows = [
         PriceOut(
             source=d["source"],
             price=d["price"],
@@ -200,13 +213,39 @@ async def prices(
         .sort("price", DESCENDING)
         .limit(limit)
     ]
+    cached = bool(rows)
+
+    if not rows and live:
+        rows = await fetch_live(target, country, limit)
+
+    return PricesOut(
+        country=target.name,
+        country_code=target.iso2,
+        calling_code=target.calling_code,
+        cached=cached,
+        rows=rows,
+    )
+
+
+@app.get("/countries/resolve", tags=["prices"], dependencies=[Depends(auth)])
+async def resolve_country(
+    country: str = Query(description="Country name, ISO code, calling code or flag"),
+):
+    target = resolve(country)
+    if target is None:
+        raise HTTPException(404, f"unknown country: {country}")
+    return {"input": country, "country": target.name, "iso2": target.iso2, "calling_code": target.calling_code}
 
 
 # ------------------------------ settings --------------------------------- #
 @app.get("/settings", tags=["settings"], dependencies=[Depends(auth)])
 async def get_settings():
     doc = await db.settings_doc()
-    return {"check_times": doc.get("check_times", []), "currency": doc.get("currency", "USD")}
+    return {
+        "check_times": doc.get("check_times", []),
+        "currency": doc.get("currency", "USD"),
+        "live_fetch": settings.live_fetch,
+    }
 
 
 @app.patch("/settings", tags=["settings"], dependencies=[Depends(auth)])
@@ -236,4 +275,5 @@ async def health():
         "account_connected": account.connected,
         "sources": await db.db.sources.count_documents({"enabled": True}),
         "countries": len(await db.db.prices.distinct("country_code")),
+        "live_fetch": settings.live_fetch,
     }
