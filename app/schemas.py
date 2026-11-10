@@ -48,6 +48,14 @@ class PriceOut(BaseModel):
     updated_at: datetime
 
 
+class PricesOut(BaseModel):
+    country: str
+    country_code: str
+    calling_code: str
+    cached: bool
+    rows: list[PriceOut]
+
+
 class SettingsIn(BaseModel):
     check_times: list[str] | None = Field(default=None, description='e.g. ["10:00", "22:00"]')
     currency: str | None = None
