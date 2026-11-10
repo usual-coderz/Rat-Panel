@@ -37,6 +37,21 @@ async def _ask(source: dict, target: Country, query: str) -> list:
     return []
 
 
+def _to_out(row, source: dict, currency: str) -> PriceOut:
+    return PriceOut(
+        source=source["username"],
+        price=row.price,
+        free=row.free,
+        new=row.new,
+        spam=row.spam,
+        perm=row.perm,
+        stock=row.stock,
+        cooldown=row.cooldown,
+        currency=currency,
+        updated_at=now(),
+    )
+
+
 async def fetch_live(target: Country, query: str, limit: int) -> list[PriceOut]:
     if not settings.live_fetch or not account.connected:
         return []
@@ -65,14 +80,9 @@ async def fetch_live(target: Country, query: str, limit: int) -> list[PriceOut]:
                 return
 
             await store_rows(source, rows, currency)
-            for country, price in rows:
-                if country.iso2 == target.iso2:
-                    found.append(PriceOut(
-                        source=source["username"],
-                        price=price,
-                        currency=currency,
-                        updated_at=now(),
-                    ))
+            for row in rows:
+                if row.country.iso2 == target.iso2:
+                    found.append(_to_out(row, source, currency))
 
     await asyncio.gather(*(one(source) for source in sources))
     found.sort(key=lambda row: row.price, reverse=True)
