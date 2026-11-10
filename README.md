@@ -26,3 +26,17 @@ Docs: http://127.0.0.1:8080/docs
 4. `GET /prices?country=France`.
 
 No scheduler inside. `PATCH /settings` stores the two check times; your integration calls `/scan`.
+
+
+Method	Path	Purpose
+GET	/account	current account (masked session)
+POST	/account	connect / replace the single account
+DELETE	/account	disconnect + forget
+GET	/sources	list bots
+POST	/sources	add bot (start_payload optional)
+PATCH	/sources/{id}	edit username / payload / enabled
+DELETE	/sources/{id}	remove bot + its prices
+POST	/scan	send /cap to every enabled source
+GET	/prices?country=	sorted prices
+GET/PATCH	/settings	check times + currency
+GET	/health	status
