@@ -11,15 +11,18 @@ from aiogram.enums import ParseMode
 from aiogram.filters import BaseFilter, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import settings
 
-logging.basicConfig(level=settings.log_level, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logging.basicConfig(
+    level=settings.log_level, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
 log = logging.getLogger("bot")
 
 router = Router()
 HEADERS = {"X-API-Key": settings.api_key}
+TIMEOUT = httpx.Timeout(settings.scan_timeout + 60, connect=15)
 
 
 class Admin(BaseFilter):
@@ -39,12 +42,16 @@ class Flow(StatesGroup):
 
 
 async def api(method: str, path: str, **kwargs):
-    async with httpx.AsyncClient(base_url=settings.api_base_url, headers=HEADERS, timeout=180) as client:
-        resp = await client.request(method, path, **kwargs)
-        try:
-            return resp.status_code, resp.json()
-        except Exception:
-            return resp.status_code, {"detail": resp.text}
+    try:
+        async with httpx.AsyncClient(base_url=settings.api_base_url, headers=HEADERS, timeout=TIMEOUT) as client:
+            resp = await client.request(method, path, **kwargs)
+    except httpx.HTTPError as exc:
+        log.warning("api %s %s failed: %s", method, path, exc)
+        return 503, {"detail": f"api unreachable ({exc.__class__.__name__})"}
+    try:
+        return resp.status_code, resp.json()
+    except ValueError:
+        return resp.status_code, {"detail": resp.text[:200]}
 
 
 def back(to: str = "home") -> InlineKeyboardMarkup:
@@ -89,9 +96,9 @@ async def home(cb: CallbackQuery, state: FSMContext):
 
 
 # ------------------------------- account --------------------------------- #
-@router.callback_query(F.data == "account")
-async def account_view(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
+async def account_render(cb: CallbackQuery, state: FSMContext | None):
+    if state is not None:
+        await state.clear()
     _, acc = await api("GET", "/account")
     if not acc.get("connected"):
         text = "👤 <b>ACCOUNT</b>\n\nnone connected\n\nSend <code>api_id|api_hash|session_string</code>"
@@ -114,10 +121,17 @@ async def account_view(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@router.callback_query(F.data == "account")
+async def account_view(cb: CallbackQuery, state: FSMContext):
+    await account_render(cb, state)
+
+
 @router.callback_query(F.data == "acc_add")
 async def ask_account(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Flow.account)
-    await cb.message.edit_text("Send <code>api_id|api_hash|session_string</code>", reply_markup=back("account"))
+    await cb.message.edit_text(
+        "Send <code>api_id|api_hash|session_string</code>", reply_markup=back("account")
+    )
     await cb.answer()
 
 
@@ -138,9 +152,9 @@ async def save_account(message: Message, state: FSMContext):
 
 
 @router.callback_query(F.data == "acc_del")
-async def delete_account(cb: CallbackQuery):
+async def delete_account(cb: CallbackQuery, state: FSMContext):
     await api("DELETE", "/account")
-    await account_view(cb, None)
+    await account_render(cb, state)
 
 
 # ------------------------------- sources --------------------------------- #
@@ -177,8 +191,9 @@ async def sources_list(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "src_add")
 async def ask_source(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Flow.source)
-    await cb.message.edit_text("Send <code>@username</code> or <code>@username|start_payload</code>",
-                               reply_markup=back("sources"))
+    await cb.message.edit_text(
+        "Send <code>@username</code> or <code>@username|start_payload</code>", reply_markup=back("sources")
+    )
     await cb.answer()
 
 
@@ -224,11 +239,10 @@ async def scan(cb: CallbackQuery):
     if code != 200:
         await cb.message.edit_text(f"⚠️ {data.get('detail')}", reply_markup=back())
         return
-    await cb.message.edit_text(
-        f"✅ done\nsources: {data['sources']}\nrecords: {data['records']}"
-        + (f"\nerrors: {len(data['errors'])}" if data["errors"] else ""),
-        reply_markup=back(),
-    )
+    body = f"✅ done\nsources: {data['sources']}\nrecords: {data['records']}"
+    if data["errors"]:
+        body += "\n\n⚠️ failures:\n" + "\n".join(data["errors"][:5])
+    await cb.message.edit_text(body, reply_markup=back())
 
 
 # ------------------------------- prices ---------------------------------- #
@@ -242,17 +256,18 @@ async def ask_price(cb: CallbackQuery, state: FSMContext):
 @router.message(Flow.price)
 async def show_prices(message: Message, state: FSMContext):
     await state.clear()
-    code, rows = await api("GET", "/prices", params={"country": message.text or ""})
+    country = (message.text or "").strip()
+    code, rows = await api("GET", "/prices", params={"country": country, "limit": 3})
     if code != 200:
         await message.answer(f"⚠️ {rows.get('detail')}", reply_markup=home_kb())
         return
     if not rows:
         await message.answer("❌ No data.", reply_markup=home_kb())
         return
-    lines = [f"💰 <b>{message.text.upper()}</b>", ""]
+    lines = [f"💰 <b>{country.upper()}</b> — top 3", ""]
     for medal, row in zip(("🥇", "🥈", "🥉"), rows):
-        lines.append(f"{medal} {row['source']} — ${row['price']:.2f}")
-    lines.append(f"\n🕒 {rows[0]['updated_at'][11:16]}")
+        lines.append(f"{medal} {row['source']} — {row['currency']} {row['price']:,.2f}")
+    lines.append(f"\n🕒 {rows[0]['updated_at'][11:16]} UTC")
     await message.answer("\n".join(lines), reply_markup=home_kb())
 
 
@@ -295,12 +310,17 @@ async def save_times(message: Message, state: FSMContext):
     await message.answer("✅ saved" if code == 200 else f"❌ {data.get('detail')}", reply_markup=back("settings"))
 
 
+@router.errors()
+async def on_error(event: ErrorEvent):
+    log.exception("handler error: %s", event.exception, exc_info=event.exception)
+
+
 async def main() -> None:
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
-    log.info("admin bot polling")
-    await dispatcher.start_polling(bot)
+    log.info("admin bot polling as admin_ids=%s", settings.admin_ids)
+    await dispatcher.start_polling(bot, allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":
