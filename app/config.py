@@ -32,6 +32,7 @@ class Config:
     default_currency: str = _s("DEFAULT_CURRENCY", "USD").upper()
     reply_timeout: int = _i("REPLY_TIMEOUT", 45)
     send_delay: int = _i("SEND_DELAY", 2)
+    scan_timeout: int = _i("SCAN_TIMEOUT", 900)
     log_level: str = _s("LOG_LEVEL", "INFO").upper()
 
 
