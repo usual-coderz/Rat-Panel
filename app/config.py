@@ -20,6 +20,13 @@ def _i(key: str, default: int) -> int:
         return default
 
 
+def _b(key: str, default: bool) -> bool:
+    raw = _s(key).lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _ids(key: str) -> tuple[int, ...]:
     return tuple(int(x) for x in _s(key).replace(";", ",").split(",") if x.strip().isdigit())
 
@@ -38,6 +45,8 @@ class Config:
     send_delay: int = _i("SEND_DELAY", 2)
     scan_concurrency: int = max(1, _i("SCAN_CONCURRENCY", 3))
     scan_timeout: int = _i("SCAN_TIMEOUT", 900)
+    live_fetch: bool = _b("LIVE_FETCH", True)
+    live_attempts: int = max(1, _i("LIVE_ATTEMPTS", 3))
     log_level: str = _s("LOG_LEVEL", "INFO").upper()
 
 
