@@ -276,20 +276,33 @@ async def ask_price(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+def _money(value: float | None) -> str:
+    return "—" if value is None else f"{value:,.2f}"
+
+
 def render_prices(data: dict) -> str:
     rows = data.get("rows") or []
-    header = (
+    lines = [
         f"💰 <b>{escape(str(data.get('country')).upper())}</b> "
-        f"<code>+{escape(str(data.get('calling_code')))}</code>"
-    )
-    source = "cache" if data.get("cached") else "live"
-    lines = [header, f"<i>top {len(rows)} — {source}</i>", ""]
+        f"<code>+{escape(str(data.get('calling_code')))}</code>",
+        f"<i>top {len(rows)} — {'cache' if data.get('cached') else 'live'}</i>",
+        "",
+    ]
     for medal, row in zip(MEDALS, rows):
+        lines.append(f"{medal} <code>{escape(str(row['source']))}</code>")
         lines.append(
-            f"{medal} <code>{escape(str(row['source']))}</code> — "
             f"<code>{escape(str(row['currency']))} {row['price']:,.2f}</code>"
+            f" · free {_money(row.get('free'))} · new {_money(row.get('new'))}"
+            f" · spam {_money(row.get('spam'))} · perm {_money(row.get('perm'))}"
         )
-    lines.append(f"\n🕒 {str(rows[0]['updated_at'])[11:16]} UTC")
+        extra = []
+        if row.get("stock") is not None:
+            extra.append(f"stock {row['stock']}")
+        if row.get("cooldown"):
+            extra.append(f"cd {escape(str(row['cooldown']))}")
+        lines.append(" · ".join(extra) if extra else "—")
+        lines.append("")
+    lines.append(f"🕒 {str(rows[0]['updated_at'])[11:16]} UTC")
     return "\n".join(lines)
 
 
