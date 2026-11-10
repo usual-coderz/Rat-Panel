@@ -8,6 +8,7 @@ from typing import Any
 from app.config import settings
 from app.db import db, now
 from app.parser import parse
+from app.store import store_rows
 from app.telegram import account
 
 log = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ async def run_scan() -> dict[str, Any]:
     if not sources:
         return {"status": "no_sources", "sources": 0, "records": 0, "errors": []}
 
-    currency = (await db.settings_doc()).get("currency", "USD")
+    currency = (await db.settings_doc()).get("currency", settings.default_currency)
     sem = asyncio.Semaphore(settings.scan_concurrency)
     errors: list[str] = []
     records = 0
@@ -30,7 +31,10 @@ async def run_scan() -> dict[str, Any]:
         nonlocal records
         async with sem:
             try:
-                text = await account.fetch_capacity(source["username"], source.get("start_payload"))
+                text = await asyncio.wait_for(
+                    account.fetch_capacity(source["username"], source.get("start_payload")),
+                    settings.scan_timeout,
+                )
             except Exception as exc:
                 log.warning("source %s failed: %s", source["username"], exc)
                 errors.append(f"{source['username']}: {exc}")
@@ -41,21 +45,8 @@ async def run_scan() -> dict[str, Any]:
                 return
 
             rows = parse(text)
-            for country, price in rows:
-                await db.db.prices.update_one(
-                    {"source_id": str(source["_id"]), "country_code": country.iso2},
-                    {"$set": {
-                        "source_id": str(source["_id"]),
-                        "source": source["username"],
-                        "country": country.name,
-                        "country_code": country.iso2,
-                        "calling_code": country.calling_code,
-                        "price": price,
-                        "currency": currency,
-                        "updated_at": now(),
-                    }},
-                    upsert=True,
-                )
+            if rows:
+                await store_rows(source, rows, currency)
 
             records += len(rows)
             await db.db.sources.update_one(
@@ -67,7 +58,7 @@ async def run_scan() -> dict[str, Any]:
                 }},
             )
 
-    await asyncio.gather(*(one(s) for s in sources))
+    await asyncio.gather(*(one(source) for source in sources))
     return {
         "status": "completed",
         "sources": len(sources),
